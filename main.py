@@ -107,6 +107,7 @@ if __name__ == '__main__':
     # MAM and CPS configuration
     parser.add_argument('--use_mam', action='store_true', help='if use mutual aggregation module')
     parser.add_argument('--use_cps', action='store_true', help='if use commonality-based prototype selection')
+    parser.add_argument('--cps_alpha', type=float, default=0.3, help='Residual weight for CPS purified prototype')
 
     # Fusion configuration
     parser.add_argument('--fusion_mode', type=str, default='scalar', choices=['scalar', 'dynamic'],

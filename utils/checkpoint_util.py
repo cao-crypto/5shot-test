@@ -7,101 +7,200 @@ import torch
 
 
 def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
-    # load pretrained model for point cloud encoding
+    """Load pretrained encoder checkpoint with robust prefix-aware key matching."""
     model_dict = model.state_dict()
     
     # Filter to only encoder keys in the model
     model_encoder_keys = {k: v for k, v in model_dict.items() if k.startswith('encoder.')}
     
-    if pretrain_checkpoint_path is not None:
-        print('\n=== CHECKPOINT DIAGNOSTICS ===')
-        print(f'Loading encoder module from pretrained checkpoint: {pretrain_checkpoint_path}')
+    if pretrain_checkpoint_path is None:
+        raise ValueError('Pretrained checkpoint must be given.')
+    
+    print('\n=== CHECKPOINT DIAGNOSTICS ===')
+    print(f'Loading encoder module from pretrained checkpoint: {pretrain_checkpoint_path}')
+    
+    # Load checkpoint on CPU
+    checkpoint_path = os.path.join(pretrain_checkpoint_path, 'checkpoint.tar')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    # Validate checkpoint format - must contain "params" key
+    if 'params' not in checkpoint:
+        existing_keys = list(checkpoint.keys())
+        raise KeyError(
+            f'Checkpoint does not contain "params" key! This is not a valid pretrain checkpoint.\n'
+            f'Existing checkpoint keys: {existing_keys}\n'
+            'Pretrain checkpoints should contain a "params" key with encoder weights.\n'
+            'Meta-training checkpoints contain "model_state_dict", "optimizer_state_dict", etc.\n'
+            'Ensure --pretrain_checkpoint_path points to a pretrain checkpoint, not meta-training.'
+        )
+    
+    pretrained_dict = checkpoint['params']
+    
+    # Statistics
+    total_checkpoint_raw_keys = len(pretrained_dict)
+    total_model_encoder_keys = len(model_encoder_keys)
+    matched_keys = {}
+    missing_keys = []
+    unexpected_keys = []
+    shape_mismatch_keys = []
+    matched_key_pairs = []  # Track (raw_key, model_key) pairs for debugging
+    
+    print(f'\n[Stats] Raw checkpoint keys: {total_checkpoint_raw_keys}')
+    print(f'[Stats] Model encoder keys: {total_model_encoder_keys}')
+    
+    # Print first 50 raw checkpoint keys
+    raw_keys_list = list(pretrained_dict.keys())
+    print('\n[Raw Checkpoint Keys] First 50:')
+    for i, key in enumerate(raw_keys_list[:50], 1):
+        print(f'  {i:2d}. {key}')
+    if len(raw_keys_list) > 50:
+        print(f'  ... and {len(raw_keys_list) - 50} more')
+    
+    # Print first 50 model encoder keys
+    model_keys_list = list(model_encoder_keys.keys())
+    print('\n[Model Encoder Keys] First 50:')
+    for i, key in enumerate(model_keys_list[:50], 1):
+        print(f'  {i:2d}. {key}')
+    if len(model_keys_list) > 50:
+        print(f'  ... and {len(model_keys_list) - 50} more')
+    
+    # Prefix-aware key matching - generates candidate model keys for a given checkpoint key
+    def get_candidate_keys(k):
+        """Generate candidate model keys for a given checkpoint key."""
+        candidates = []
         
-        # Load checkpoint on CPU to avoid GPU memory issues
-        checkpoint = torch.load(os.path.join(pretrain_checkpoint_path, 'checkpoint.tar'), map_location='cpu')
-        pretrained_dict = checkpoint['params']
+        # Base candidates: try as-is, with encoder., and with encoder.backbone.
+        candidates.append(k)                                  # k
+        candidates.append('encoder.' + k)                     # encoder.k
+        candidates.append('encoder.backbone.' + k)            # encoder.backbone.k
         
-        # Convert checkpoint keys to model format by prefixing 'encoder.'
-        pretrained_encoder_dict = {'encoder.' + k: v for k, v in pretrained_dict.items()}
+        # Handle module. prefix
+        if k.startswith('module.'):
+            stripped = k[len('module.'):]                     # k without module.
+            candidates.append(stripped)                       # stripped
+            candidates.append('encoder.' + stripped)          # encoder.stripped
+            candidates.append('encoder.backbone.' + stripped) # encoder.backbone.stripped
         
-        # Statistics
-        total_checkpoint_keys = len(pretrained_encoder_dict)
-        total_model_encoder_keys = len(model_encoder_keys)
-        matched_keys = []
-        missing_keys = []
-        unexpected_keys = []
-        shape_mismatch_keys = []
+        # Handle encoder. prefix (already has encoder.)
+        if k.startswith('encoder.'):
+            stripped = k[len('encoder.'):]                    # k without encoder.
+            candidates.append('encoder.backbone.' + stripped) # encoder.backbone.stripped
         
-        print(f'\nCheckpoint encoder keys: {total_checkpoint_keys}')
-        print(f'Model encoder keys: {total_model_encoder_keys}')
+        # Handle module.encoder. prefix
+        if k.startswith('module.encoder.'):
+            stripped = k[len('module.'):]                     # encoder.xxx
+            candidates.append(stripped)                       # encoder.xxx
+            stripped2 = k[len('module.encoder.'):]            # xxx
+            candidates.append('encoder.backbone.' + stripped2) # encoder.backbone.xxx
         
-        # Check each checkpoint key
-        for ckpt_key, ckpt_value in pretrained_encoder_dict.items():
-            if ckpt_key not in model_dict:
-                unexpected_keys.append(ckpt_key)
-            else:
-                model_value = model_dict[ckpt_key]
+        # Handle backbone. prefix
+        if k.startswith('backbone.'):
+            candidates.append('encoder.' + k)                  # encoder.backbone.xxx
+            stripped = k[len('backbone.'):]                   # xxx
+            candidates.append('encoder.' + stripped)           # encoder.xxx
+            candidates.append('encoder.backbone.' + stripped)  # encoder.backbone.xxx
+        
+        # Handle module.backbone. prefix
+        if k.startswith('module.backbone.'):
+            stripped = k[len('module.'):]                     # backbone.xxx
+            candidates.append('encoder.' + stripped)          # encoder.backbone.xxx
+            stripped2 = k[len('module.backbone.'):]           # xxx
+            candidates.append('encoder.' + stripped2)         # encoder.xxx
+            candidates.append('encoder.backbone.' + stripped2) # encoder.backbone.xxx
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_candidates = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                unique_candidates.append(c)
+        
+        return unique_candidates
+    
+    # Try to match each checkpoint key to model
+    for ckpt_key, ckpt_value in pretrained_dict.items():
+        candidates = get_candidate_keys(ckpt_key)
+        matched = False
+        
+        for candidate in candidates:
+            if candidate in model_dict:
+                model_value = model_dict[candidate]
                 if ckpt_value.shape == model_value.shape:
-                    matched_keys.append(ckpt_key)
+                    # Only add if not already matched (avoid duplicates)
+                    if candidate not in matched_keys:
+                        matched_keys[candidate] = ckpt_value
+                        matched_key_pairs.append((ckpt_key, candidate))
+                    matched = True
+                    break
                 else:
                     shape_mismatch_keys.append(
-                        f'{ckpt_key}: checkpoint_shape={ckpt_value.shape}, model_shape={model_value.shape}'
+                        f'{ckpt_key} -> {candidate}: checkpoint_shape={ckpt_value.shape}, model_shape={model_value.shape}'
                     )
         
-        # Check for missing keys (model keys not in checkpoint)
-        for model_key in model_encoder_keys:
-            if model_key not in pretrained_encoder_dict:
-                missing_keys.append(model_key)
-        
-        # Print diagnostics
-        print(f'\nSuccessfully matched encoder keys: {len(matched_keys)}')
-        
-        if missing_keys:
-            print(f'\nMissing encoder keys ({len(missing_keys)}):')
-            for key in missing_keys[:30]:
-                print(f'  - {key}')
-            if len(missing_keys) > 30:
-                print(f'  ... and {len(missing_keys) - 30} more')
-        
-        if unexpected_keys:
-            print(f'\nUnexpected checkpoint keys ({len(unexpected_keys)}):')
-            for key in unexpected_keys[:30]:
-                print(f'  - {key}')
-            if len(unexpected_keys) > 30:
-                print(f'  ... and {len(unexpected_keys) - 30} more')
-        
-        if shape_mismatch_keys:
-            print(f'\nShape mismatch keys ({len(shape_mismatch_keys)}):')
-            for key_info in shape_mismatch_keys[:30]:
-                print(f'  - {key_info}')
-            if len(shape_mismatch_keys) > 30:
-                print(f'  ... and {len(shape_mismatch_keys) - 30} more')
-        
-        # Calculate loading ratio
-        loaded_ratio = len(matched_keys) / total_model_encoder_keys if total_model_encoder_keys > 0 else 0.0
-        print(f'\nLoaded ratio: {loaded_ratio:.4f} ({len(matched_keys)}/{total_model_encoder_keys})')
-        
-        # Only load parameters whose key exists in model and shape matches
-        filtered_pretrained_dict = {
-            k: v for k, v in pretrained_encoder_dict.items()
-            if k in model_dict and v.shape == model_dict[k].shape
-        }
-        
-        model_dict.update(filtered_pretrained_dict)
+        if not matched:
+            unexpected_keys.append(ckpt_key)
+    
+    # Check for missing keys (model encoder keys not matched)
+    for model_key in model_encoder_keys:
+        if model_key not in matched_keys:
+            missing_keys.append(model_key)
+    
+    # Print matched key pairs
+    print(f'\n[Matched Keys] {len(matched_key_pairs)} matched:')
+    if matched_key_pairs:
+        print('  Raw key -> Model key:')
+        for i, (raw, model) in enumerate(matched_key_pairs[:50], 1):
+            print(f'  {i:2d}. {raw} -> {model}')
+        if len(matched_key_pairs) > 50:
+            print(f'  ... and {len(matched_key_pairs) - 50} more')
+    
+    # Print missing keys
+    if missing_keys:
+        print(f'\n[Missing Keys] {len(missing_keys)} model encoder keys not found in checkpoint:')
+        for i, key in enumerate(missing_keys[:50], 1):
+            print(f'  {i:2d}. {key}')
+        if len(missing_keys) > 50:
+            print(f'  ... and {len(missing_keys) - 50} more')
+    
+    # Print unexpected keys
+    if unexpected_keys:
+        print(f'\n[Unexpected Keys] {len(unexpected_keys)} checkpoint keys could not be matched:')
+        for i, key in enumerate(unexpected_keys[:50], 1):
+            print(f'  {i:2d}. {key}')
+        if len(unexpected_keys) > 50:
+            print(f'  ... and {len(unexpected_keys) - 50} more')
+    
+    # Print shape mismatches
+    if shape_mismatch_keys:
+        print(f'\n[Shape Mismatches] {len(shape_mismatch_keys)} keys with shape mismatch:')
+        for i, key_info in enumerate(shape_mismatch_keys[:50], 1):
+            print(f'  {i:2d}. {key_info}')
+        if len(shape_mismatch_keys) > 50:
+            print(f'  ... and {len(shape_mismatch_keys) - 50} more')
+    
+    # Calculate loading ratio
+    loaded_ratio = len(matched_keys) / total_model_encoder_keys if total_model_encoder_keys > 0 else 0.0
+    print(f'\n[Loading Ratio] {loaded_ratio:.4f} ({len(matched_keys)}/{total_model_encoder_keys})')
+    
+    # Only load if ratio passes threshold
+    if loaded_ratio >= 0.90:
+        model_dict.update(matched_keys)
         model.load_state_dict(model_dict, strict=False)
-        
-        # Raise error if loading ratio is too low
-        if loaded_ratio < 0.90:
-            raise RuntimeError(
-                f'Checkpoint loading ratio ({loaded_ratio:.4f}) is below 0.90!\n'
-                'This indicates a mismatch between the pretrained checkpoint and current model.\n'
-                'Please check: --use_high_dgcnn, backbone_name, dataset fold, and checkpoint path.'
-            )
-        
-        print('=== END CHECKPOINT DIAGNOSTICS ===\n')
+        print('\n[SUCCESS] Pretrained encoder weights loaded successfully!')
     else:
-        raise ValueError('Pretrained checkpoint must be given.')
-
+        raise RuntimeError(
+            f'[ERROR] Checkpoint loading ratio ({loaded_ratio:.4f}) is below 0.90!\n'
+            'This indicates a mismatch between the pretrained checkpoint and current model.\n'
+            'Please verify:\n'
+            '  1. --use_high_dgcnn setting matches pretraining\n'
+            '  2. --backbone_name setting matches pretraining\n'
+            '  3. --pretrain_checkpoint_path points to correct pretrain checkpoint\n'
+            '  4. Ensure pretrained encoder architecture matches current model\n'
+            'See diagnostic output above for key matching details.'
+        )
+    
+    print('=== END CHECKPOINT DIAGNOSTICS ===\n')
     return model
 
 

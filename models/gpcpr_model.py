@@ -371,7 +371,10 @@ class GPCPR(nn.Module):
         if self.use_mam:
             self.mam = MutualAggregationModule(dim=args.train_dim, num_heads=4, dropout=0.1)
         if self.use_cps:
-            self.cps = CommonalityBasedPrototypeSelection(dim=args.train_dim)
+            self.cps = CommonalityBasedPrototypeSelection(
+                dim=args.train_dim, 
+                cps_alpha=getattr(args, 'cps_alpha', 0.3)
+            )
 
     def forward(self, support_x, support_y, query_x, query_y, text_emb=None, text_emb_diff=None):
         """
@@ -453,16 +456,18 @@ class GPCPR(nn.Module):
             fg_prototypes, bg_prototype = self.getWeightedPrototype(support_feat, fg_mask, bg_mask)
             prototypes = [bg_prototype] + fg_prototypes
             prototypes = torch.stack(prototypes, dim=0)
-            
-            # Additional debug logs for prototype quality
-            if self.training and getattr(self, '_proto_debug_logged', 0) <= 3:
-                print(f'prototypes shape: {prototypes.shape}')
-                fg_norms = [float(p.norm().item()) for p in fg_prototypes]
-                print('Foreground prototype L2 norms:', [f'{n:.4f}' for n in fg_norms])
-                print(f'Background prototype L2 norm: {float(bg_prototype.norm().item()):.4f}')
-                print(f'prototypes contains NaN: {torch.any(torch.isnan(prototypes)).item()}')
-                print(f'prototypes contains Inf: {torch.any(torch.isinf(prototypes)).item()}')
-                print('=== END PROTOTYPE DEBUG LOG ===')
+        
+        # Additional debug logs for prototype quality (use prototypes only, not branch-local variables)
+        if self.training and getattr(self, '_proto_debug_logged', 0) <= 3:
+            print(f'prototypes shape: {prototypes.shape}')
+            # Background is prototypes[0], foreground are prototypes[1:]
+            bg_norm = float(prototypes[0].norm().item())
+            fg_norms = [float(prototypes[i].norm().item()) for i in range(1, prototypes.shape[0])]
+            print(f'Background prototype L2 norm: {bg_norm:.4f}')
+            print('Foreground prototype L2 norms:', [f'{n:.4f}' for n in fg_norms])
+            print(f'prototypes contains NaN: {torch.any(torch.isnan(prototypes)).item()}')
+            print(f'prototypes contains Inf: {torch.any(torch.isinf(prototypes)).item()}')
+            print('=== END PROTOTYPE DEBUG LOG ===')
         # 任务感知的原型引导交叉门控
         # 使用前景原型的平均值作为任务原型（排除背景）
         # 如果存在前景原型则使用前景，否则回退到全部原型
@@ -523,7 +528,9 @@ class GPCPR(nn.Module):
             # Select best support shot per way instead of averaging across shots
             # (point indices don't correspond across different support point clouds)
             support_feat_ = self.selectSupportMemory(support_feat, fg_mask)  # [n_way, C, N]
-            print(f'DEBUG: support_memory shape: {support_feat_.shape}')
+            # Restrict debug printing to first 3 iterations
+            if self.training and getattr(self, '_proto_debug_logged', 0) <= 3:
+                print(f'DEBUG: support_memory shape: {support_feat_.shape}')
             prototypes_all_post = self.transformer(query_refined, support_feat_, prototypes_all)
 
             # 注释掉了
@@ -618,7 +625,8 @@ class GPCPR(nn.Module):
         if self.use_align:
             align_loss = align_loss + self.alignLoss_trans(query_refined, query_pred, support_feat, fg_mask, bg_mask)  # 使用refined特征
 
-        # MAM operates in identity mode, so no MAM loss is needed
+        # Initialize mam_loss as zero tensor (MAM operates in identity mode)
+        mam_loss = query_refined.new_tensor(0.0)
 
         dd_loss = 0
         if self.use_dd_loss and self.use_pcpr and self.use_transformer:
