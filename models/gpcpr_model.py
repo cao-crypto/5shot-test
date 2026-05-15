@@ -452,8 +452,8 @@ class GPCPR(nn.Module):
             purified_prototypes = self.cps(support_feat, query_feat, fg_mask, bg_mask, self.n_way, self.k_shot)
             prototypes = torch.stack(purified_prototypes, dim=0)
         else:
-            # Use point-count weighted prototype aggregation
-            fg_prototypes, bg_prototype = self.getWeightedPrototype(support_feat, fg_mask, bg_mask)
+            # Use robust shot-level weighted prototype aggregation
+            fg_prototypes, bg_prototype = self.getRobustWeightedPrototype(support_feat, fg_mask, bg_mask)
             prototypes = [bg_prototype] + fg_prototypes
             prototypes = torch.stack(prototypes, dim=0)
         
@@ -917,6 +917,113 @@ class GPCPR(nn.Module):
         bg_count = bg_count.clamp_min(1.0)  # Avoid division by zero
         
         bg_prototype = bg_sum / bg_count
+        
+        return fg_prototypes, bg_prototype
+
+    def getRobustWeightedPrototype(self, support_feat, fg_mask, bg_mask, tau=0.2):
+        """
+        Compute robust weighted prototypes using shot-level reliability weighting.
+        Combines point-count weighting with cosine similarity-based reliability weighting.
+        
+        Args:
+            support_feat: support features, shape: (n_way, k_shot, C, N)
+            fg_mask: foreground masks, shape: (n_way, k_shot, N)
+            bg_mask: background masks, shape: (n_way, k_shot, N)
+            tau: temperature for softmax on cosine similarities
+        Returns:
+            fg_prototypes: list of n_way foreground prototypes, each [C]
+            bg_prototype: background prototype [C]
+        """
+        n_way, k_shot, C, N = support_feat.shape
+        
+        # Debug logging
+        do_debug = self.should_debug_log()
+        
+        # Compute foreground prototypes (one per way) with shot-level reliability weighting
+        fg_prototypes = []
+        for way in range(n_way):
+            # Compute shot prototypes and counts
+            shot_protos = []
+            shot_counts = []
+            
+            for shot in range(k_shot):
+                # Get foreground mask for this shot
+                shot_mask = fg_mask[way, shot].float()  # [N]
+                mask_sum = shot_mask.sum()
+                
+                if mask_sum > 0:
+                    # Compute shot prototype
+                    masked_feat = support_feat[way, shot] * shot_mask.unsqueeze(0)  # [C, N]
+                    shot_proto = masked_feat.sum(dim=-1) / mask_sum  # [C]
+                else:
+                    # If no foreground points, use zero vector
+                    shot_proto = support_feat.new_zeros(C)
+                
+                shot_protos.append(shot_proto)
+                shot_counts.append(mask_sum)
+            
+            # Convert to tensors
+            shot_protos = torch.stack(shot_protos, dim=0)  # [k_shot, C]
+            shot_counts = torch.tensor(shot_counts, device=support_feat.device)  # [k_shot]
+            
+            # Compute preliminary mean prototype
+            valid_mask = shot_counts > 0
+            if valid_mask.any():
+                # Weight by point count for preliminary mean
+                count_weights = shot_counts.clamp_min(0) / shot_counts.clamp_min(0).sum().clamp_min(1.0)
+                mean_proto = (shot_protos * count_weights.unsqueeze(-1)).sum(dim=0)  # [C]
+            else:
+                # Fallback: use average of all shot protos
+                mean_proto = shot_protos.mean(dim=0)  # [C]
+            
+            # Compute cosine similarity between each shot proto and mean proto
+            shot_protos_norm = shot_protos.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            mean_proto_norm = mean_proto.norm().clamp_min(1e-6)
+            similarities = (shot_protos * mean_proto.unsqueeze(0)).sum(dim=-1) / (shot_protos_norm.squeeze() * mean_proto_norm)
+            similarities = similarities.clamp(-1, 1)  # Ensure valid cosine values
+            
+            # Compute count weights (normalized point counts)
+            count_w = shot_counts.clamp_min(0) / shot_counts.clamp_min(0).sum().clamp_min(1.0)
+            
+            # Compute similarity-based reliability weights
+            sim_w = F.softmax(similarities / tau, dim=0)
+            
+            # Combine weights: 70% count-based, 30% reliability-based
+            final_w = 0.7 * count_w + 0.3 * sim_w
+            final_w = final_w / final_w.sum().clamp_min(1e-6)  # Normalize
+            
+            # Compute final foreground prototype
+            fg_proto = (shot_protos * final_w.unsqueeze(-1)).sum(dim=0)  # [C]
+            fg_prototypes.append(fg_proto)
+            
+            # Debug logging
+            if do_debug:
+                self.log(f'\n[Way {way} Shot Weights]')
+                self.log(f'  Point counts: {[int(c.item()) for c in shot_counts]}')
+                self.log(f'  Cosine similarities: {[f"{s:.4f}" for s in similarities]}')
+                self.log(f'  Count weights: {[f"{w:.4f}" for w in count_w]}')
+                self.log(f'  Sim weights: {[f"{w:.4f}" for w in sim_w]}')
+                self.log(f'  Final weights: {[f"{w:.4f}" for w in final_w]}')
+        
+        # Compute background prototype (point-count weighted, unchanged)
+        bg_mask_expanded = bg_mask.unsqueeze(2).float()  # [n_way, k_shot, 1, N]
+        weighted_bg_feat = support_feat * bg_mask_expanded  # [n_way, k_shot, C, N]
+        
+        bg_sum = weighted_bg_feat.sum(dim=(0, 1, 3))  # [C]
+        bg_count = bg_mask.float().sum()  # scalar
+        bg_count = bg_count.clamp_min(1.0)  # Avoid division by zero
+        
+        bg_prototype = bg_sum / bg_count
+        
+        # Debug logging
+        if do_debug:
+            fg_norms = [float(p.norm().item()) for p in fg_prototypes]
+            self.log(f'\n[Robust Prototype Stats]')
+            self.log(f'  Foreground prototype L2 norms: {[f"{n:.4f}" for n in fg_norms]}')
+            self.log(f'  Background prototype L2 norm: {float(bg_prototype.norm().item()):.4f}')
+            all_protos = torch.stack([bg_prototype] + fg_prototypes)
+            self.log(f'  Prototypes contain NaN: {torch.any(torch.isnan(all_protos)).item()}')
+            self.log(f'  Prototypes contain Inf: {torch.any(torch.isinf(all_protos)).item()}')
         
         return fg_prototypes, bg_prototype
 

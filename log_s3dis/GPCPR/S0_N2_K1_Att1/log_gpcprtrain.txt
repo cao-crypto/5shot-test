@@ -12309,3 +12309,198 @@ use_text_diff: True
 use_transformer: True
 -------------- End ----------------
 
+------------ Options -------------
+backbone_name: dgcnn
+base_widths: [128, 64]
+batch_size: 1
+boundary_knn_k: 5
+cps_alpha: 0.3
+cvfold: 0
+data_path: ./datasets/S3DIS/blocks_bs1_s1
+dataset: s3dis
+dd_ratio1: 1.0
+dd_ratio2: 1.0
+dgcnn_k: 20
+dgcnn_mlp_widths: [512, 256]
+dist_method: euclidean
+edgeconv_widths: [[64, 64], [64, 64], [64, 64]]
+embedding_num: 10
+embedding_type: gpt35
+eval_interval: 1500
+fusion_mode: scalar
+gamma: 0.5
+generator_lr: 0.0002
+gmm_dropout: 0.1
+gmm_weight: 0.1
+k_shot: 1
+lambda_boundary: 0.1
+log_dir: ./log_s3dis/GPCPR/S0_N2_K1_Att1
+lr: 0.001
+model_checkpoint_path: None
+n_episode_test: 100
+n_iters: 40000
+n_queries: 1
+n_way: 2
+n_workers: 16
+noise_dim: 1024
+output_dim: 64
+pc_attribs: xyzrgbXYZ
+pc_augm: False
+pc_augm_color: 0
+pc_augm_jitter: 1
+pc_augm_mirror_prob: 0
+pc_augm_rot: 1
+pc_augm_scale: 0
+pc_augm_shift: 0
+pc_in_dim: 9
+pc_npts: 2048
+phase: gpcprtrain
+pretrain_checkpoint_path: ./log_s3dis/pretrain_S0
+pretrain_gamma: 0.5
+pretrain_lr: 0.001
+pretrain_step_size: 50
+pretrain_weight_decay: 0.0
+save_path: ./log_s3dis/GPCPR/
+step_size: 5000
+train_dim: 320
+trans_lr: 0.0001
+use_align: True
+use_attention: True
+use_boundary_shallow: False
+use_channelwise_dynamic_fusion: False
+use_cps: True
+use_dd_loss: True
+use_high_dgcnn: True
+use_linear_proj: False
+use_mam: True
+use_pcpr: True
+use_supervise_prototype: True
+use_text: True
+use_text_diff: True
+use_transformer: True
+-------------- End ----------------
+
+=====[Train] Iter: 99 | Loss: 2.0108 | Accuracy: 0.665527 =====
+=====[Train] Iter: 199 | Loss: 1.2857 | Accuracy: 0.836182 =====
+=====[Train] Iter: 299 | Loss: 0.8966 | Accuracy: 0.924561 =====
+=====[Train] Iter: 399 | Loss: 1.0312 | Accuracy: 0.898926 =====
+------------ Options -------------
+backbone_name: dgcnn
+base_widths: [128, 64]
+batch_size: 1
+boundary_knn_k: 5
+cps_alpha: 0.3
+cvfold: 0
+data_path: ./datasets/S3DIS/blocks_bs1_s1
+dataset: s3dis
+dd_ratio1: 1.0
+dd_ratio2: 1.0
+dgcnn_k: 20
+dgcnn_mlp_widths: [512, 256]
+dist_method: euclidean
+edgeconv_widths: [[64, 64], [64, 64], [64, 64]]
+embedding_num: 10
+embedding_type: gpt35
+eval_interval: 1500
+fusion_mode: scalar
+gamma: 0.5
+generator_lr: 0.0002
+gmm_dropout: 0.1
+gmm_weight: 0.1
+k_shot: 1
+lambda_boundary: 0.1
+log_dir: ./log_s3dis/GPCPR/S0_N2_K1_Att1
+lr: 0.001
+model_checkpoint_path: None
+n_episode_test: 100
+n_iters: 40000
+n_queries: 1
+n_way: 2
+n_workers: 16
+noise_dim: 1024
+output_dim: 64
+pc_attribs: xyzrgbXYZ
+pc_augm: False
+pc_augm_color: 0
+pc_augm_jitter: 1
+pc_augm_mirror_prob: 0
+pc_augm_rot: 1
+pc_augm_scale: 0
+pc_augm_shift: 0
+pc_in_dim: 9
+pc_npts: 2048
+phase: gpcprtrain
+pretrain_checkpoint_path: ./log_s3dis/pretrain_S0
+pretrain_gamma: 0.5
+pretrain_lr: 0.001
+pretrain_step_size: 50
+pretrain_weight_decay: 0.0
+save_path: ./log_s3dis/GPCPR/
+step_size: 5000
+train_dim: 320
+trans_lr: 0.0001
+use_align: True
+use_attention: True
+use_boundary_shallow: False
+use_channelwise_dynamic_fusion: False
+use_cps: True
+use_dd_loss: True
+use_high_dgcnn: True
+use_linear_proj: False
+use_mam: True
+use_pcpr: True
+use_supervise_prototype: True
+use_text: True
+use_text_diff: True
+use_transformer: True
+-------------- End ----------------
+
+=====[Train] Iter: 99 | Loss: 2.4380 | Accuracy: 0.454834 =====
+=====[Train] Iter: 199 | Loss: 2.5181 | Accuracy: 0.629639 =====
+=====[Train] Iter: 299 | Loss: 1.7660 | Accuracy: 0.755127 =====
+=====[Train] Iter: 399 | Loss: 1.1448 | Accuracy: 0.802490 =====
+=====[Train] Iter: 499 | Loss: 1.4595 | Accuracy: 0.840332 =====
+=====[Train] Iter: 599 | Loss: 1.6946 | Accuracy: 0.774414 =====
+=====[Train] Iter: 699 | Loss: 0.8156 | Accuracy: 0.975098 =====
+=====[Train] Iter: 799 | Loss: 1.6748 | Accuracy: 0.797363 =====
+=====[Train] Iter: 899 | Loss: 0.6691 | Accuracy: 0.946045 =====
+=====[Train] Iter: 999 | Loss: 1.0409 | Accuracy: 0.881592 =====
+=====[Train] Iter: 1099 | Loss: 1.0654 | Accuracy: 0.946777 =====
+=====[Train] Iter: 1199 | Loss: 1.1257 | Accuracy: 0.920654 =====
+=====[Train] Iter: 1299 | Loss: 0.8628 | Accuracy: 0.925049 =====
+=====[Train] Iter: 1399 | Loss: 1.1288 | Accuracy: 0.897217 =====
+=====[Train] Iter: 1499 | Loss: 0.8455 | Accuracy: 0.968994 =====
+[Eval] Iter: 100 | Loss: 1.0158 | Acc: 0.95 | 2026-05-14 22:19:22.541675
+[Eval] Iter: 200 | Loss: 1.8930 | Acc: 0.78 | 2026-05-14 22:19:27.398877
+[Eval] Iter: 300 | Loss: 2.0582 | Acc: 0.71 | 2026-05-14 22:19:32.246793
+[Eval] Iter: 400 | Loss: 1.4715 | Acc: 0.82 | 2026-05-14 22:19:37.152885
+[Eval] Iter: 500 | Loss: 1.9608 | Acc: 0.87 | 2026-05-14 22:19:42.208420
+[Eval] Iter: 600 | Loss: 2.3688 | Acc: 0.75 | 2026-05-14 22:19:47.214216
+[Eval] Iter: 700 | Loss: 3.8271 | Acc: 0.50 | 2026-05-14 22:19:52.064417
+[Eval] Iter: 800 | Loss: 1.4553 | Acc: 0.81 | 2026-05-14 22:19:56.907485
+[Eval] Iter: 900 | Loss: 2.2069 | Acc: 0.55 | 2026-05-14 22:20:01.775767
+[Eval] Iter: 1000 | Loss: 1.9836 | Acc: 0.63 | 2026-05-14 22:20:06.611668
+[Eval] Iter: 1100 | Loss: 1.5088 | Acc: 0.72 | 2026-05-14 22:20:11.458495
+[Eval] Iter: 1200 | Loss: 1.8599 | Acc: 0.90 | 2026-05-14 22:20:16.307122
+[Eval] Iter: 1300 | Loss: 1.4045 | Acc: 0.75 | 2026-05-14 22:20:21.140059
+[Eval] Iter: 1400 | Loss: 1.8423 | Acc: 0.75 | 2026-05-14 22:20:25.986646
+[Eval] Iter: 1500 | Loss: 1.0695 | Acc: 0.98 | 2026-05-14 22:20:30.827856
+*****Test Classes: [3, 11, 10, 0, 8, 4]*****
+----- [class 0]  IoU: 0.593817 -----
+----- [class 1]  IoU: 0.426431 -----
+----- [class 2]  IoU: 0.654493 -----
+----- [class 3]  IoU: 0.685637 -----
+----- [class 4]  IoU: 0.470523 -----
+----- [class 5]  IoU: 0.767376 -----
+----- [class 6]  IoU: 0.586877 -----
+
+=====[VALID] Loss: 1.8857 | Mean IoU: 0.598556  =====
+*******************Model Saved*******************
+=====Best valid IoU Is: 0.598556 =====
+
+=====[Train] Iter: 1599 | Loss: 1.2681 | Accuracy: 0.919189 =====
+=====[Train] Iter: 1699 | Loss: 0.4303 | Accuracy: 0.976318 =====
+=====[Train] Iter: 1799 | Loss: 0.9190 | Accuracy: 0.894775 =====
+=====[Train] Iter: 1899 | Loss: 0.7499 | Accuracy: 0.952393 =====
+=====[Train] Iter: 1999 | Loss: 1.1163 | Accuracy: 0.890625 =====
+=====[Train] Iter: 2099 | Loss: 1.1417 | Accuracy: 0.811035 =====

@@ -150,8 +150,8 @@ def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
     print(f'\n[Matched Keys] {len(matched_key_pairs)} matched:')
     if matched_key_pairs:
         print('  Raw key -> Model key:')
-        for i, (raw, model) in enumerate(matched_key_pairs[:50], 1):
-            print(f'  {i:2d}. {raw} -> {model}')
+        for i, (raw_key, matched_model_key) in enumerate(matched_key_pairs[:50], 1):
+            print(f'  {i:2d}. {raw_key} -> {matched_model_key}')
         if len(matched_key_pairs) > 50:
             print(f'  ... and {len(matched_key_pairs) - 50} more')
     
