@@ -107,7 +107,17 @@ if __name__ == '__main__':
     # MAM and CPS configuration
     parser.add_argument('--use_mam', action='store_true', help='if use mutual aggregation module')
     parser.add_argument('--use_cps', action='store_true', help='if use commonality-based prototype selection')
-    parser.add_argument('--cps_alpha', type=float, default=0.3, help='Residual weight for CPS purified prototype')
+    parser.add_argument('--cps_alpha', type=float, default=0.1, help='Residual weight for CPS purified prototype')
+    parser.add_argument('--cps_top_ratio', type=float, default=0.7, help='Keep top N%% similar support points for CPS purification')
+    parser.add_argument('--cps_tau', type=float, default=0.2, help='Temperature for similarity softmax in CPS')
+
+    # Debug logging configuration
+    parser.add_argument('--enable_debug_logs', action='store_true',
+                        help='Write detailed debugging diagnostics into log file.')
+    parser.add_argument('--debug_log_interval', type=int, default=500,
+                        help='Log detailed diagnostics every N forward calls.')
+    parser.add_argument('--debug_log_first_n', type=int, default=3,
+                        help='Log detailed diagnostics for the first N forward calls.')
 
     # Fusion configuration
     parser.add_argument('--fusion_mode', type=str, default='scalar', choices=['scalar', 'dynamic'],

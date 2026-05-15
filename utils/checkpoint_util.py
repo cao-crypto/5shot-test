@@ -6,8 +6,18 @@ import os
 import torch
 
 
-def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
+def load_pretrain_checkpoint(model, pretrain_checkpoint_path, logger=None):
     """Load pretrained encoder checkpoint with robust prefix-aware key matching."""
+    
+    # Helper for file-only debug logging
+    def debug_log(msg):
+        if logger is not None and hasattr(logger, 'debug'):
+            logger.debug(str(msg))
+        elif logger is not None and hasattr(logger, 'fprint'):
+            logger.fprint(str(msg))
+        else:
+            print(str(msg))
+    
     model_dict = model.state_dict()
     
     # Filter to only encoder keys in the model
@@ -16,8 +26,12 @@ def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
     if pretrain_checkpoint_path is None:
         raise ValueError('Pretrained checkpoint must be given.')
     
-    print('\n=== CHECKPOINT DIAGNOSTICS ===')
-    print(f'Loading encoder module from pretrained checkpoint: {pretrain_checkpoint_path}')
+    # Terminal message (short summary)
+    print(f'Loading pretrained encoder from: {pretrain_checkpoint_path}')
+    
+    # Detailed diagnostics (file only)
+    debug_log('\n=== CHECKPOINT DIAGNOSTICS ===')
+    debug_log(f'Loading encoder module from pretrained checkpoint: {pretrain_checkpoint_path}')
     
     # Load checkpoint on CPU
     checkpoint_path = os.path.join(pretrain_checkpoint_path, 'checkpoint.tar')
@@ -45,24 +59,25 @@ def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
     shape_mismatch_keys = []
     matched_key_pairs = []  # Track (raw_key, model_key) pairs for debugging
     
-    print(f'\n[Stats] Raw checkpoint keys: {total_checkpoint_raw_keys}')
-    print(f'[Stats] Model encoder keys: {total_model_encoder_keys}')
+    # Detailed stats (file only)
+    debug_log(f'\n[Stats] Raw checkpoint keys: {total_checkpoint_raw_keys}')
+    debug_log(f'[Stats] Model encoder keys: {total_model_encoder_keys}')
     
-    # Print first 50 raw checkpoint keys
+    # Log first 50 raw checkpoint keys (file only)
     raw_keys_list = list(pretrained_dict.keys())
-    print('\n[Raw Checkpoint Keys] First 50:')
+    debug_log('\n[Raw Checkpoint Keys] First 50:')
     for i, key in enumerate(raw_keys_list[:50], 1):
-        print(f'  {i:2d}. {key}')
+        debug_log(f'  {i:2d}. {key}')
     if len(raw_keys_list) > 50:
-        print(f'  ... and {len(raw_keys_list) - 50} more')
+        debug_log(f'  ... and {len(raw_keys_list) - 50} more')
     
-    # Print first 50 model encoder keys
+    # Log first 50 model encoder keys (file only)
     model_keys_list = list(model_encoder_keys.keys())
-    print('\n[Model Encoder Keys] First 50:')
+    debug_log('\n[Model Encoder Keys] First 50:')
     for i, key in enumerate(model_keys_list[:50], 1):
-        print(f'  {i:2d}. {key}')
+        debug_log(f'  {i:2d}. {key}')
     if len(model_keys_list) > 50:
-        print(f'  ... and {len(model_keys_list) - 50} more')
+        debug_log(f'  ... and {len(model_keys_list) - 50} more')
     
     # Prefix-aware key matching - generates candidate model keys for a given checkpoint key
     def get_candidate_keys(k):
@@ -146,50 +161,55 @@ def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
         if model_key not in matched_keys:
             missing_keys.append(model_key)
     
-    # Print matched key pairs
-    print(f'\n[Matched Keys] {len(matched_key_pairs)} matched:')
+    # Log matched key pairs (file only)
+    debug_log(f'\n[Matched Keys] {len(matched_key_pairs)} matched:')
     if matched_key_pairs:
-        print('  Raw key -> Model key:')
+        debug_log('  Raw key -> Model key:')
         for i, (raw_key, matched_model_key) in enumerate(matched_key_pairs[:50], 1):
-            print(f'  {i:2d}. {raw_key} -> {matched_model_key}')
+            debug_log(f'  {i:2d}. {raw_key} -> {matched_model_key}')
         if len(matched_key_pairs) > 50:
-            print(f'  ... and {len(matched_key_pairs) - 50} more')
+            debug_log(f'  ... and {len(matched_key_pairs) - 50} more')
     
-    # Print missing keys
+    # Log missing keys (file only)
     if missing_keys:
-        print(f'\n[Missing Keys] {len(missing_keys)} model encoder keys not found in checkpoint:')
+        debug_log(f'\n[Missing Keys] {len(missing_keys)} model encoder keys not found in checkpoint:')
         for i, key in enumerate(missing_keys[:50], 1):
-            print(f'  {i:2d}. {key}')
+            debug_log(f'  {i:2d}. {key}')
         if len(missing_keys) > 50:
-            print(f'  ... and {len(missing_keys) - 50} more')
+            debug_log(f'  ... and {len(missing_keys) - 50} more')
     
-    # Print unexpected keys
+    # Log unexpected keys (file only)
     if unexpected_keys:
-        print(f'\n[Unexpected Keys] {len(unexpected_keys)} checkpoint keys could not be matched:')
+        debug_log(f'\n[Unexpected Keys] {len(unexpected_keys)} checkpoint keys could not be matched:')
         for i, key in enumerate(unexpected_keys[:50], 1):
-            print(f'  {i:2d}. {key}')
+            debug_log(f'  {i:2d}. {key}')
         if len(unexpected_keys) > 50:
-            print(f'  ... and {len(unexpected_keys) - 50} more')
+            debug_log(f'  ... and {len(unexpected_keys) - 50} more')
     
-    # Print shape mismatches
+    # Log shape mismatches (file only)
     if shape_mismatch_keys:
-        print(f'\n[Shape Mismatches] {len(shape_mismatch_keys)} keys with shape mismatch:')
+        debug_log(f'\n[Shape Mismatches] {len(shape_mismatch_keys)} keys with shape mismatch:')
         for i, key_info in enumerate(shape_mismatch_keys[:50], 1):
-            print(f'  {i:2d}. {key_info}')
+            debug_log(f'  {i:2d}. {key_info}')
         if len(shape_mismatch_keys) > 50:
-            print(f'  ... and {len(shape_mismatch_keys) - 50} more')
+            debug_log(f'  ... and {len(shape_mismatch_keys) - 50} more')
     
     # Calculate loading ratio
     loaded_ratio = len(matched_keys) / total_model_encoder_keys if total_model_encoder_keys > 0 else 0.0
-    print(f'\n[Loading Ratio] {loaded_ratio:.4f} ({len(matched_keys)}/{total_model_encoder_keys})')
+    
+    # Log loading ratio (file only)
+    debug_log(f'\n[Loading Ratio] {loaded_ratio:.4f} ({len(matched_keys)}/{total_model_encoder_keys})')
     
     # Only load if ratio passes threshold
     if loaded_ratio >= 0.90:
         model_dict.update(matched_keys)
         model.load_state_dict(model_dict, strict=False)
-        print('\n[SUCCESS] Pretrained encoder weights loaded successfully!')
+        # Terminal message (short)
+        print(f'Checkpoint loaded successfully (ratio: {loaded_ratio:.4f})')
+        # Detailed log (file only)
+        debug_log('\n[SUCCESS] Pretrained encoder weights loaded successfully!')
     else:
-        raise RuntimeError(
+        error_msg = (
             f'[ERROR] Checkpoint loading ratio ({loaded_ratio:.4f}) is below 0.90!\n'
             'This indicates a mismatch between the pretrained checkpoint and current model.\n'
             'Please verify:\n'
@@ -199,8 +219,11 @@ def load_pretrain_checkpoint(model, pretrain_checkpoint_path):
             '  4. Ensure pretrained encoder architecture matches current model\n'
             'See diagnostic output above for key matching details.'
         )
+        # Log error details (file only)
+        debug_log(error_msg)
+        raise RuntimeError(error_msg)
     
-    print('=== END CHECKPOINT DIAGNOSTICS ===\n')
+    debug_log('=== END CHECKPOINT DIAGNOSTICS ===\n')
     return model
 
 

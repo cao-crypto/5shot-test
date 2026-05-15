@@ -13,6 +13,15 @@ class IOStream():
         self.f.write(text+'\n')
         self.f.flush()
 
+    def fprint(self, text):
+        """Write to file only, no terminal output."""
+        self.f.write(str(text) + '\n')
+        self.f.flush()
+
+    def debug(self, text):
+        """Write debug message to file only."""
+        self.fprint(text)
+
     def close(self):
         self.f.close()
 

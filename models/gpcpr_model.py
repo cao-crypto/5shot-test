@@ -102,18 +102,6 @@ class MutualAggregationModule(nn.Module):
         Note: Operates in safety mode (identity) because different support shots
         don't have point-index correspondence. Averaging across shots would be invalid.
         """
-        # Debug logs
-        if self.training:
-            if not hasattr(self, '_mam_debug_logged') or getattr(self, '_mam_debug_logged', 0) < 3:
-                print('\n=== MAM DEBUG (SAFETY MODE) ===')
-                print(f'MAM support_feat input shape: {support_feat.shape}')
-                print(f'MAM query_feat input shape: {query_feat.shape}')
-                print(f'MAM support_feat output shape: {support_feat.shape}')
-                print(f'MAM query_feat output shape: {query_feat.shape}')
-                print('MAM operating in identity mode (no changes)')
-                print('=== END MAM DEBUG ===')
-                setattr(self, '_mam_debug_logged', getattr(self, '_mam_debug_logged', 0) + 1)
-        
         # Identity mode - return inputs unchanged
         return support_feat, query_feat
 
@@ -121,13 +109,93 @@ class MutualAggregationModule(nn.Module):
 class CommonalityBasedPrototypeSelection(nn.Module):
     """Commonality-based Prototype Selection (CPS) for semantic purification
     
-    Support-only purification: computes similarity between support points and base prototype,
-    then performs conservative residual blending.
+    Support-only purification with robust shot-level base prototypes and top-ratio selection.
+    Combines:
+    1. Robust shot-level weighted base prototypes (70% count + 30% similarity)
+    2. Top-ratio support-only purification
+    3. Conservative residual blending
     """
-    def __init__(self, dim, cps_alpha=0.3):
+    def __init__(self, dim, cps_alpha=0.1, cps_top_ratio=0.7, tau=0.2):
         super().__init__()
         self.dim = dim
         self.cps_alpha = cps_alpha  # Blending weight for purified prototype
+        self.cps_top_ratio = cps_top_ratio  # Keep top N% similar support points
+        self.tau = tau  # Temperature for similarity softmax
+
+    def _compute_robust_base_prototypes(self, support_feat, fg_mask, bg_mask, n_way, k_shot):
+        """
+        Compute robust base prototypes using shot-level reliability weighting.
+        
+        Args:
+            support_feat: (n_way, k_shot, C, N)
+            fg_mask: (n_way, k_shot, N)
+            bg_mask: (n_way, k_shot, N)
+            n_way: number of ways
+            k_shot: number of shots
+        Returns:
+            fg_prototypes_base: list of n_way foreground prototypes
+            bg_prototype_base: background prototype
+        """
+        C = support_feat.shape[2]
+        
+        # Compute foreground prototypes with shot-level reliability weighting
+        fg_prototypes_base = []
+        for way in range(n_way):
+            # Compute shot prototypes and counts
+            shot_protos = []
+            shot_counts = []
+            
+            for shot in range(k_shot):
+                shot_mask = fg_mask[way, shot].float()
+                mask_sum = shot_mask.sum()
+                
+                if mask_sum > 0:
+                    masked_feat = support_feat[way, shot] * shot_mask.unsqueeze(0)
+                    shot_proto = masked_feat.sum(dim=-1) / mask_sum
+                else:
+                    shot_proto = support_feat.new_zeros(C)
+                
+                shot_protos.append(shot_proto)
+                shot_counts.append(mask_sum)
+            
+            shot_protos = torch.stack(shot_protos, dim=0)  # [k_shot, C]
+            shot_counts = torch.tensor(shot_counts, device=support_feat.device)  # [k_shot]
+            
+            # Compute preliminary mean prototype (count-weighted)
+            valid_mask = shot_counts > 0
+            if valid_mask.any():
+                count_weights = shot_counts.clamp_min(0) / shot_counts.clamp_min(0).sum().clamp_min(1.0)
+                mean_proto = (shot_protos * count_weights.unsqueeze(-1)).sum(dim=0)
+            else:
+                mean_proto = shot_protos.mean(dim=0)
+            
+            # Compute cosine similarity between shot protos and mean proto
+            shot_protos_norm = shot_protos.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            mean_proto_norm = mean_proto.norm().clamp_min(1e-6)
+            similarities = (shot_protos * mean_proto.unsqueeze(0)).sum(dim=-1) / (shot_protos_norm.squeeze() * mean_proto_norm)
+            similarities = similarities.clamp(-1, 1)
+            
+            # Compute weights
+            count_w = shot_counts.clamp_min(0) / shot_counts.clamp_min(0).sum().clamp_min(1.0)
+            sim_w = F.softmax(similarities / self.tau, dim=0)
+            
+            # Combine weights: 70% count, 30% similarity
+            final_w = 0.7 * count_w + 0.3 * sim_w
+            final_w = final_w / final_w.sum().clamp_min(1e-6)
+            
+            # Final foreground prototype
+            fg_proto = (shot_protos * final_w.unsqueeze(-1)).sum(dim=0)
+            fg_prototypes_base.append(fg_proto)
+        
+        # Compute background prototype (point-count weighted)
+        bg_mask_expanded = bg_mask.unsqueeze(2).float()
+        weighted_bg_feat = support_feat * bg_mask_expanded
+        
+        bg_sum = weighted_bg_feat.sum(dim=(0, 1, 3))
+        bg_count = bg_mask.float().sum().clamp_min(1.0)
+        bg_prototype_base = bg_sum / bg_count
+        
+        return fg_prototypes_base, bg_prototype_base
 
     def forward(self, support_feat, query_feat, fg_mask, bg_mask, n_way, k_shot):
         """
@@ -141,101 +209,104 @@ class CommonalityBasedPrototypeSelection(nn.Module):
         Returns:
             purified_prototypes: list of [bg_prototype] + fg_prototypes
         """
-        # Generate base prototypes (support-only, no query involved)
-        fg_feat = support_feat * fg_mask.unsqueeze(2)
-        bg_feat = support_feat * bg_mask.unsqueeze(2)
+        # Generate base prototypes using robust shot-level weighting
+        fg_prototypes_base, bg_prototype_base = self._compute_robust_base_prototypes(
+            support_feat, fg_mask, bg_mask, n_way, k_shot
+        )
 
-        fg_prototypes_base = []
-        for way in range(n_way):
-            sum_val = fg_mask[way].sum().clamp_min(1.0)
-            fg_proto = fg_feat[way].sum(dim=(0, 2)) / sum_val
-            fg_prototypes_base.append(fg_proto)
-
-        bg_sum = bg_mask.sum().clamp_min(1.0)
-        bg_prototype_base = bg_feat.sum(dim=(0, 1, 3)) / bg_sum
-
-        # Support-only purification: compute similarity between support points and base prototypes
-        # This avoids invalid query-support point correspondence
+        # Top-ratio purification for foreground
         fg_prototypes_purified = []
+        debug_info = []
+        
         for way in range(n_way):
-            # Get foreground support features for this way
-            fg_support = support_feat[way] * fg_mask[way].unsqueeze(1)  # [k_shot, C, N]
+            base_proto = fg_prototypes_base[way]
+            fg_support = support_feat[way]  # [k_shot, C, N]
+            valid = fg_mask[way] > 0  # [k_shot, N]
             
-            # Compute similarity between support foreground points and base prototype
-            # fg_support: [k_shot, C, N], fg_prototypes_base[way]: [C]
+            # Compute similarity
             similarity = F.cosine_similarity(
-                fg_support, 
-                fg_prototypes_base[way].unsqueeze(0).unsqueeze(-1), 
+                fg_support,
+                base_proto.view(1, -1, 1),
                 dim=1
             )  # [k_shot, N]
             
-            # Use similarity to weight support points (higher similarity = higher weight)
-            # Clamp to avoid extreme weights
-            weights = torch.clamp(similarity, min=0.0)  # [k_shot, N]
+            sim_valid = similarity[valid]
             
-            # Apply weights and mask
-            weighted_fg_support = fg_support * weights.unsqueeze(1)  # [k_shot, C, N]
+            if sim_valid.numel() == 0:
+                # No valid foreground points, use base prototype
+                fg_prototypes_purified.append(base_proto)
+                debug_info.append((way, 0, 0, float('nan')))
+                continue
+            
+            # Top-ratio selection
+            top_ratio = torch.clamp(torch.tensor(self.cps_top_ratio, device=support_feat.device), 0.05, 1.0)
+            threshold = torch.quantile(sim_valid.detach(), 1.0 - top_ratio)
+            
+            keep = valid & (similarity >= threshold)
+            
+            if keep.sum() == 0:
+                # Fallback to valid mask
+                keep = valid
+            
+            # Softmax weighting on kept points
+            masked_sim = similarity.masked_fill(~keep, -1e4)
+            weights = F.softmax(masked_sim.view(-1), dim=0).view_as(similarity)
             
             # Compute purified prototype
-            sum_val = (weights * fg_mask[way]).sum().clamp_min(1.0)
-            fg_proto_purified = weighted_fg_support.sum(dim=(0, 2)) / sum_val
+            purified_proto = (fg_support * weights.unsqueeze(1)).sum(dim=(0, 2))
             
-            # Residual blending: final = (1-alpha)*base + alpha*purified
-            fg_proto_final = (1 - self.cps_alpha) * fg_prototypes_base[way] + self.cps_alpha * fg_proto_purified
+            # Residual blending
+            fg_proto_final = (1 - self.cps_alpha) * base_proto + self.cps_alpha * purified_proto
             fg_prototypes_purified.append(fg_proto_final)
+            
+            # Debug info
+            base_purified_sim = F.cosine_similarity(base_proto, fg_proto_final, dim=0)
+            debug_info.append((way, valid.sum().item(), keep.sum().item(), float(base_purified_sim.item())))
 
-        # Purify background prototype (support-only)
-        bg_support = support_feat * bg_mask.unsqueeze(2)  # [n_way, k_shot, C, N]
+        # Top-ratio purification for background
+        bg_support = support_feat  # [n_way, k_shot, C, N]
+        valid_bg = bg_mask > 0  # [n_way, k_shot, N]
         
-        # Compute similarity between support background points and base prototype
+        # Compute similarity
         similarity_bg = F.cosine_similarity(
-            bg_support, 
-            bg_prototype_base.unsqueeze(0).unsqueeze(0).unsqueeze(-1), 
+            bg_support,
+            bg_prototype_base.view(1, 1, -1, 1),
             dim=2
         )  # [n_way, k_shot, N]
         
-        weights_bg = torch.clamp(similarity_bg, min=0.0)  # [n_way, k_shot, N]
-        weighted_bg_support = bg_support * weights_bg.unsqueeze(2)  # [n_way, k_shot, C, N]
+        sim_valid_bg = similarity_bg[valid_bg]
         
-        sum_val_bg = (weights_bg * bg_mask).sum().clamp_min(1.0)
-        bg_proto_purified = weighted_bg_support.sum(dim=(0, 1, 3)) / sum_val_bg
-        
-        # Residual blending for background
-        bg_proto_final = (1 - self.cps_alpha) * bg_prototype_base + self.cps_alpha * bg_proto_purified
-
-        # Debug logs
-        if self.training:
-            if not hasattr(self, '_cps_debug_logged') or getattr(self, '_cps_debug_logged', 0) < 3:
-                print('\n=== CPS DEBUG ===')
-                print(f'CPS alpha: {self.cps_alpha}')
-                print(f'Base fg prototype shapes: {[p.shape for p in fg_prototypes_base]}')
-                print(f'Base bg prototype shape: {bg_prototype_base.shape}')
-                
-                # Compute cosine similarities between base and purified
-                print('Cosine similarity between base and purified prototypes:')
-                for way in range(n_way):
-                    sim = F.cosine_similarity(fg_prototypes_base[way], fg_prototypes_purified[way], dim=0)
-                    print(f'  Foreground way {way}: {float(sim.item()):.4f}')
-                bg_sim = F.cosine_similarity(bg_prototype_base, bg_proto_final, dim=0)
-                print(f'  Background: {float(bg_sim.item()):.4f}')
-                
-                # L2 norms
-                print('L2 norms:')
-                for way in range(n_way):
-                    print(f'  FG way {way} - base: {float(fg_prototypes_base[way].norm().item()):.4f}, purified: {float(fg_prototypes_purified[way].norm().item()):.4f}')
-                print(f'  BG - base: {float(bg_prototype_base.norm().item()):.4f}, purified: {float(bg_proto_final.norm().item()):.4f}')
-                
-                # Check for NaN/Inf
-                all_protos = [bg_proto_final] + fg_prototypes_purified
-                has_nan = any(torch.any(torch.isnan(p)).item() for p in all_protos)
-                has_inf = any(torch.any(torch.isinf(p)).item() for p in all_protos)
-                print(f'Prototypes contain NaN: {has_nan}')
-                print(f'Prototypes contain Inf: {has_inf}')
-                print('=== END CPS DEBUG ===')
-                setattr(self, '_cps_debug_logged', getattr(self, '_cps_debug_logged', 0) + 1)
+        if sim_valid_bg.numel() > 0:
+            # Top-ratio selection
+            top_ratio_bg = torch.clamp(torch.tensor(self.cps_top_ratio, device=support_feat.device), 0.05, 1.0)
+            threshold_bg = torch.quantile(sim_valid_bg.detach(), 1.0 - top_ratio_bg)
+            
+            keep_bg = valid_bg & (similarity_bg >= threshold_bg)
+            
+            if keep_bg.sum() == 0:
+                keep_bg = valid_bg
+            
+            # Softmax weighting
+            masked_sim_bg = similarity_bg.masked_fill(~keep_bg, -1e4)
+            weights_bg = F.softmax(masked_sim_bg.view(-1), dim=0).view_as(similarity_bg)
+            
+            # Compute purified prototype
+            bg_proto_purified = (bg_support * weights_bg.unsqueeze(2)).sum(dim=(0, 1, 3))
+            
+            # Residual blending
+            bg_proto_final = (1 - self.cps_alpha) * bg_prototype_base + self.cps_alpha * bg_proto_purified
+            bg_valid_count = valid_bg.sum().item()
+            bg_kept_count = keep_bg.sum().item()
+            bg_base_purified_sim = float(F.cosine_similarity(bg_prototype_base, bg_proto_final, dim=0).item())
+        else:
+            bg_proto_final = bg_prototype_base
+            bg_valid_count = 0
+            bg_kept_count = 0
+            bg_base_purified_sim = float('nan')
 
         # Combine prototypes
         purified_prototypes = [bg_proto_final] + fg_prototypes_purified
+        
         return purified_prototypes
 
 
@@ -269,6 +340,14 @@ class BaseLearner(nn.Module):
 class GPCPR(nn.Module):
     def __init__(self, args):
         super(GPCPR, self).__init__()
+        
+        # Logger and debug configuration
+        self.logger = None
+        self.debug_forward_counter = 0
+        self.enable_debug_logs = getattr(args, "enable_debug_logs", False)
+        self.debug_log_interval = getattr(args, "debug_log_interval", 500)
+        self.debug_log_first_n = getattr(args, "debug_log_first_n", 3)
+        
         # self.args = args
         self.n_way = args.n_way
         self.k_shot = args.k_shot
@@ -372,9 +451,24 @@ class GPCPR(nn.Module):
             self.mam = MutualAggregationModule(dim=args.train_dim, num_heads=4, dropout=0.1)
         if self.use_cps:
             self.cps = CommonalityBasedPrototypeSelection(
-                dim=args.train_dim, 
-                cps_alpha=getattr(args, 'cps_alpha', 0.3)
+                dim=args.train_dim,
+                cps_alpha=getattr(args, 'cps_alpha', 0.1),
+                cps_top_ratio=getattr(args, 'cps_top_ratio', 0.7),
+                tau=getattr(args, 'cps_tau', 0.2)
             )
+    
+    def set_logger(self, logger):
+        """Set logger for file-only debug logging."""
+        self.logger = logger
+    
+    def debug_log(self, msg):
+        """Log debug message to file only."""
+        if getattr(self, 'logger', None) is not None and hasattr(self.logger, 'debug'):
+            self.logger.debug(str(msg))
+        elif getattr(self, 'logger', None) is not None and hasattr(self.logger, 'fprint'):
+            self.logger.fprint(str(msg))
+        else:
+            pass
 
     def forward(self, support_x, support_y, query_x, query_y, text_emb=None, text_emb_diff=None):
         """
@@ -422,29 +516,34 @@ class GPCPR(nn.Module):
         fg_mask = support_y
         bg_mask = torch.logical_not(support_y)
 
-        # Debug logs (first iteration or debug mode)
-        if self.training and (not hasattr(self, '_proto_debug_logged') or getattr(self, '_proto_debug_logged', 0) < 3):
-            print('\n=== PROTOTYPE DEBUG LOG ===')
-            print(f'support_feat shape: {support_feat.shape}')
-            print(f'query_feat shape: {query_feat.shape}')
-            print(f'fg_mask shape: {fg_mask.shape}')
-            print(f'bg_mask shape: {bg_mask.shape}')
+        # Debug counter and gate
+        self.debug_forward_counter += 1
+        do_debug = self.enable_debug_logs and (
+            self.debug_forward_counter <= self.debug_log_first_n or
+            self.debug_forward_counter % self.debug_log_interval == 0
+        )
+
+        # Debug logs (file only)
+        if do_debug:
+            self.debug_log('\n=== PROTOTYPE DEBUG LOG ===')
+            self.debug_log(f'support_feat shape: {support_feat.shape}')
+            self.debug_log(f'query_feat shape: {query_feat.shape}')
+            self.debug_log(f'fg_mask shape: {fg_mask.shape}')
+            self.debug_log(f'bg_mask shape: {bg_mask.shape}')
             
             # Foreground point counts per way/shot
             fg_counts = fg_mask.sum(dim=-1)  # [n_way, k_shot]
-            print(f'Foreground point counts (way x shot):')
+            self.debug_log(f'Foreground point counts (way x shot):')
             for way in range(self.n_way):
                 shot_counts = [int(fg_counts[way, shot].item()) for shot in range(self.k_shot)]
-                print(f'  Way {way}: {shot_counts} (total: {int(fg_counts[way].sum().item())})')
+                self.debug_log(f'  Way {way}: {shot_counts} (total: {int(fg_counts[way].sum().item())})')
             
             # Background point counts per way/shot
             bg_counts = bg_mask.sum(dim=-1)  # [n_way, k_shot]
-            print(f'Background point counts (way x shot):')
+            self.debug_log(f'Background point counts (way x shot):')
             for way in range(self.n_way):
                 shot_counts = [int(bg_counts[way, shot].item()) for shot in range(self.k_shot)]
-                print(f'  Way {way}: {shot_counts} (total: {int(bg_counts[way].sum().item())})')
-            
-            setattr(self, '_proto_debug_logged', getattr(self, '_proto_debug_logged', 0) + 1)
+                self.debug_log(f'  Way {way}: {shot_counts} (total: {int(bg_counts[way].sum().item())})')
 
         # Commonality-based Prototype Selection (CPS)
         if self.use_cps:
@@ -457,17 +556,17 @@ class GPCPR(nn.Module):
             prototypes = [bg_prototype] + fg_prototypes
             prototypes = torch.stack(prototypes, dim=0)
         
-        # Additional debug logs for prototype quality (use prototypes only, not branch-local variables)
-        if self.training and getattr(self, '_proto_debug_logged', 0) <= 3:
-            print(f'prototypes shape: {prototypes.shape}')
+        # Additional debug logs for prototype quality (file only)
+        if do_debug:
+            self.debug_log(f'prototypes shape: {prototypes.shape}')
             # Background is prototypes[0], foreground are prototypes[1:]
             bg_norm = float(prototypes[0].norm().item())
             fg_norms = [float(prototypes[i].norm().item()) for i in range(1, prototypes.shape[0])]
-            print(f'Background prototype L2 norm: {bg_norm:.4f}')
-            print('Foreground prototype L2 norms:', [f'{n:.4f}' for n in fg_norms])
-            print(f'prototypes contains NaN: {torch.any(torch.isnan(prototypes)).item()}')
-            print(f'prototypes contains Inf: {torch.any(torch.isinf(prototypes)).item()}')
-            print('=== END PROTOTYPE DEBUG LOG ===')
+            self.debug_log(f'Background prototype L2 norm: {bg_norm:.4f}')
+            self.debug_log('Foreground prototype L2 norms:', [f'{n:.4f}' for n in fg_norms])
+            self.debug_log(f'prototypes contains NaN: {torch.any(torch.isnan(prototypes)).item()}')
+            self.debug_log(f'prototypes contains Inf: {torch.any(torch.isinf(prototypes)).item()}')
+            self.debug_log('=== END PROTOTYPE DEBUG LOG ===')
         # 任务感知的原型引导交叉门控
         # 使用前景原型的平均值作为任务原型（排除背景）
         # 如果存在前景原型则使用前景，否则回退到全部原型
@@ -528,9 +627,11 @@ class GPCPR(nn.Module):
             # Select best support shot per way instead of averaging across shots
             # (point indices don't correspond across different support point clouds)
             support_feat_ = self.selectSupportMemory(support_feat, fg_mask)  # [n_way, C, N]
-            # Restrict debug printing to first 3 iterations
-            if self.training and getattr(self, '_proto_debug_logged', 0) <= 3:
-                print(f'DEBUG: support_memory shape: {support_feat_.shape}')
+            # Debug logs (file only)
+            if do_debug:
+                self.debug_log('\n=== QGPA SUPPORT MEMORY DEBUG ===')
+                self.debug_log(f'QGPA support_memory shape: {support_feat_.shape}')
+                self.debug_log('=== END QGPA SUPPORT MEMORY DEBUG ===')
             prototypes_all_post = self.transformer(query_refined, support_feat_, prototypes_all)
 
             # 注释掉了
@@ -647,38 +748,36 @@ class GPCPR(nn.Module):
         if self.use_boundary_shallow:
             total_loss += boundary_loss * self.lambda_boundary
 
-        # Logits diagnostics (first few iterations)
-        if self.training:
-            if not hasattr(self, '_logits_debug_logged') or getattr(self, '_logits_debug_logged', 0) < 3:
-                print('\n=== LOGITS DIAGNOSTICS ===')
-                print(f'query_pred shape: {query_pred.shape}')
-                print(f'Logits stats - min: {query_pred.min().item():.4f}, max: {query_pred.max().item():.4f}, mean: {query_pred.mean().item():.4f}')
+        # Logits diagnostics (file only)
+        if do_debug:
+            self.debug_log('\n=== LOGITS DIAGNOSTICS ===')
+            self.debug_log(f'query_pred shape: {query_pred.shape}')
+            self.debug_log(f'Logits stats - min: {query_pred.min().item():.4f}, max: {query_pred.max().item():.4f}, mean: {query_pred.mean().item():.4f}')
+            
+            # Per-class logits mean
+            if query_pred.dim() >= 2:
+                for cls in range(query_pred.shape[1]):
+                    cls_mean = query_pred[:, cls].mean().item()
+                    self.debug_log(f'  Class {cls} logits mean: {cls_mean:.4f}')
+            
+            # Target and prediction analysis
+            if query_y is not None:
+                target_unique = torch.unique(query_y)
+                self.debug_log(f'Target unique values: {sorted([int(v.item()) for v in target_unique])}')
                 
-                # Per-class logits mean
-                if query_pred.dim() >= 2:
-                    for cls in range(query_pred.shape[1]):
-                        cls_mean = query_pred[:, cls].mean().item()
-                        print(f'  Class {cls} logits mean: {cls_mean:.4f}')
+                query_pred_argmax = query_pred.argmax(dim=1)
+                pred_unique = torch.unique(query_pred_argmax)
+                self.debug_log(f'Prediction unique values: {sorted([int(v.item()) for v in pred_unique])}')
                 
-                # Target and prediction analysis
-                if query_y is not None:
-                    target_unique = torch.unique(query_y)
-                    print(f'Target unique values: {sorted([int(v.item()) for v in target_unique])}')
-                    
-                    query_pred_argmax = query_pred.argmax(dim=1)
-                    pred_unique = torch.unique(query_pred_argmax)
-                    print(f'Prediction unique values: {sorted([int(v.item()) for v in pred_unique])}')
-                    
-                    # Check for collapse
-                    if len(pred_unique) == 1:
-                        print(f'WARNING: Predictions collapsed to single class: {int(pred_unique[0].item())}')
-                    if len(pred_unique) == 2 and 0 in [int(v.item()) for v in pred_unique]:
-                        bg_ratio = (query_pred_argmax == 0).float().mean().item()
-                        if bg_ratio > 0.95:
-                            print(f'WARNING: {bg_ratio:.1%} of predictions are background')
-                
-                print('=== END LOGITS DIAGNOSTICS ===')
-                setattr(self, '_logits_debug_logged', getattr(self, '_logits_debug_logged', 0) + 1)
+                # Check for collapse
+                if len(pred_unique) == 1:
+                    self.debug_log(f'WARNING: Predictions collapsed to single class: {int(pred_unique[0].item())}')
+                if len(pred_unique) == 2 and 0 in [int(v.item()) for v in pred_unique]:
+                    bg_ratio = (query_pred_argmax == 0).float().mean().item()
+                    if bg_ratio > 0.95:
+                        self.debug_log(f'WARNING: {bg_ratio:.1%} of predictions are background')
+            
+            self.debug_log('=== END LOGITS DIAGNOSTICS ===')
 
         return query_pred, total_loss
 
@@ -854,17 +953,21 @@ class GPCPR(nn.Module):
         # Select best shot index per way
         best_ids = fg_counts.argmax(dim=1)  # [n_way]
         
-        # Debug logs
-        if self.training and getattr(self, '_proto_debug_logged', 0) <= 3:
-            print('\n=== SUPPORT MEMORY SELECTION DEBUG ===')
-            print(f'support_feat shape: {support_feat.shape}')
-            print(f'fg_mask shape: {fg_mask.shape}')
-            print(f'Foreground counts (way x shot):')
+        # Debug logs (file only)
+        do_debug = self.enable_debug_logs and (
+            self.debug_forward_counter <= self.debug_log_first_n or
+            self.debug_forward_counter % self.debug_log_interval == 0
+        )
+        if do_debug:
+            self.debug_log('\n=== SUPPORT MEMORY SELECTION DEBUG ===')
+            self.debug_log(f'support_feat shape: {support_feat.shape}')
+            self.debug_log(f'fg_mask shape: {fg_mask.shape}')
+            self.debug_log(f'Foreground counts (way x shot):')
             for way in range(n_way):
-                print(f'  Way {way}: {[int(fg_counts[way, s].item()) for s in range(k_shot)]}')
-            print(f'Selected best shot IDs: {[int(best_ids[way].item()) for way in range(n_way)]}')
-            print(f'Selected foreground counts: {[int(fg_counts[way, best_ids[way]].item()) for way in range(n_way)]}')
-            print('=== END SUPPORT MEMORY SELECTION DEBUG ===')
+                self.debug_log(f'  Way {way}: {[int(fg_counts[way, s].item()) for s in range(k_shot)]}')
+            self.debug_log(f'Selected best shot IDs: {[int(best_ids[way].item()) for way in range(n_way)]}')
+            self.debug_log(f'Selected foreground counts: {[int(fg_counts[way, best_ids[way]].item()) for way in range(n_way)]}')
+            self.debug_log('=== END SUPPORT MEMORY SELECTION DEBUG ===')
         
         # Select best shot for each way
         support_memory = []
@@ -937,7 +1040,10 @@ class GPCPR(nn.Module):
         n_way, k_shot, C, N = support_feat.shape
         
         # Debug logging
-        do_debug = self.should_debug_log()
+        do_debug = self.enable_debug_logs and (
+            self.debug_forward_counter <= self.debug_log_first_n or
+            self.debug_forward_counter % self.debug_log_interval == 0
+        )
         
         # Compute foreground prototypes (one per way) with shot-level reliability weighting
         fg_prototypes = []
@@ -964,7 +1070,7 @@ class GPCPR(nn.Module):
             
             # Convert to tensors
             shot_protos = torch.stack(shot_protos, dim=0)  # [k_shot, C]
-            shot_counts = torch.tensor(shot_counts, device=support_feat.device)  # [k_shot]
+            shot_counts = torch.stack(shot_counts, dim=0).to(support_feat.device)  # [k_shot]
             
             # Compute preliminary mean prototype
             valid_mask = shot_counts > 0
@@ -996,14 +1102,14 @@ class GPCPR(nn.Module):
             fg_proto = (shot_protos * final_w.unsqueeze(-1)).sum(dim=0)  # [C]
             fg_prototypes.append(fg_proto)
             
-            # Debug logging
+            # Debug logging (file only)
             if do_debug:
-                self.log(f'\n[Way {way} Shot Weights]')
-                self.log(f'  Point counts: {[int(c.item()) for c in shot_counts]}')
-                self.log(f'  Cosine similarities: {[f"{s:.4f}" for s in similarities]}')
-                self.log(f'  Count weights: {[f"{w:.4f}" for w in count_w]}')
-                self.log(f'  Sim weights: {[f"{w:.4f}" for w in sim_w]}')
-                self.log(f'  Final weights: {[f"{w:.4f}" for w in final_w]}')
+                self.debug_log(f'\n[Way {way} Shot Weights]')
+                self.debug_log(f'  Point counts: {[int(c.item()) for c in shot_counts]}')
+                self.debug_log(f'  Cosine similarities: {[f"{s:.4f}" for s in similarities]}')
+                self.debug_log(f'  Count weights: {[f"{w:.4f}" for w in count_w]}')
+                self.debug_log(f'  Sim weights: {[f"{w:.4f}" for w in sim_w]}')
+                self.debug_log(f'  Final weights: {[f"{w:.4f}" for w in final_w]}')
         
         # Compute background prototype (point-count weighted, unchanged)
         bg_mask_expanded = bg_mask.unsqueeze(2).float()  # [n_way, k_shot, 1, N]
@@ -1015,15 +1121,15 @@ class GPCPR(nn.Module):
         
         bg_prototype = bg_sum / bg_count
         
-        # Debug logging
+        # Debug logging (file only)
         if do_debug:
             fg_norms = [float(p.norm().item()) for p in fg_prototypes]
-            self.log(f'\n[Robust Prototype Stats]')
-            self.log(f'  Foreground prototype L2 norms: {[f"{n:.4f}" for n in fg_norms]}')
-            self.log(f'  Background prototype L2 norm: {float(bg_prototype.norm().item()):.4f}')
+            self.debug_log(f'\n[Robust Prototype Stats]')
+            self.debug_log(f'  Foreground prototype L2 norms: {[f"{n:.4f}" for n in fg_norms]}')
+            self.debug_log(f'  Background prototype L2 norm: {float(bg_prototype.norm().item()):.4f}')
             all_protos = torch.stack([bg_prototype] + fg_prototypes)
-            self.log(f'  Prototypes contain NaN: {torch.any(torch.isnan(all_protos)).item()}')
-            self.log(f'  Prototypes contain Inf: {torch.any(torch.isinf(all_protos)).item()}')
+            self.debug_log(f'  Prototypes contain NaN: {torch.any(torch.isnan(all_protos)).item()}')
+            self.debug_log(f'  Prototypes contain Inf: {torch.any(torch.isinf(all_protos)).item()}')
         
         return fg_prototypes, bg_prototype
 
